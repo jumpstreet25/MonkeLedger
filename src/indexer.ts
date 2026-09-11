@@ -1,0 +1,317 @@
+/**
+ * indexer.ts — self-hosted Merkle-proof-generating replica of a compressed-NFT tree.
+ *
+ * Removes a DAS provider (Helius, etc.) as a real-time single point of failure for building
+ * Bubblegum transfer instructions — periodically rebuilds a local tree from a full
+ * getAssetsByGroup snapshot and refuses to serve anything that doesn't independently verify
+ * against the live on-chain root read directly from the tree account.
+ *
+ * Debugged live against real on-chain data (Saga Monkes, tree 2uH9Tk...) before trusting any of
+ * this. Two load-bearing facts that are NOT obvious from the DAS docs:
+ *
+ * 1. `getAssetsByGroup`'s bulk `compression.asset_hash` field is stale forever for a burned
+ *    leaf — it keeps the pre-burn hash while the true on-chain leaf is zeroed. The bulk item
+ *    DOES carry `burnt: true` for burned assets (confirmed live) — skip those. No live
+ *    decompressed example was available to confirm its exact bulk-response shape when this was
+ *    built; `compression.compressed === false` is excluded defensively on the assumption a
+ *    decompressed asset (which has left the tree entirely) behaves at least as safely-excludable
+ *    as a burnt one. Re-verify against a real example if your collection ever has one.
+ * 2. The proof/root pipeline (`getAssetProof`) and the bulk asset-table fields are
+ *    independently-lagging DAS subsystems — being caught up on one doesn't imply the other is.
+ *    Never trust a single root/seq stability check as proof the bulk snapshot itself is clean;
+ *    verify the rebuilt root against the live on-chain root every single refresh, and refuse to
+ *    serve a snapshot that doesn't match.
+ *
+ * Padding/hash convention (zero-fill for empty leaves, keccak256(left||right)) matches
+ * @solana/spl-account-compression's own MerkleTree class exactly — confirmed by reading its
+ * source, not assumed from docs.
+ */
+
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { resolve } from "path";
+import { Connection } from "@solana/web3.js";
+import { ConcurrentMerkleTreeAccount, MerkleTree } from "@solana/spl-account-compression";
+import bs58 from "bs58";
+import { dasCallRetry } from "./dasClient";
+import {
+  RPC_URL,
+  TREE_ADDRESS,
+  COLLECTION_ADDRESS,
+  STATE_FILE,
+  GETASSETSBYGROUP_PAGE_LIMIT,
+} from "./config";
+
+type IndexedAsset = {
+  leafIndex: number;
+  owner: string;
+  delegate: string | null;
+  dataHash: string; // base58
+  creatorHash: string; // base58
+};
+
+type IndexState = {
+  builtAtMs: number;
+  onChainRoot: string; // hex
+  depth: number;
+  leaves: Map<number, Buffer>; // leafIndex -> asset_hash (raw 32 bytes)
+  assetsById: Map<string, IndexedAsset>;
+  tree: MerkleTree;
+};
+
+let _state: IndexState | null = null;
+let _refreshing = false; // reentrancy guard — a setInterval-driven job must never overlap itself
+let _refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+let _connection: Connection | null = null;
+function getConnection(): Connection {
+  if (!_connection) _connection = new Connection(RPC_URL, "confirmed");
+  return _connection;
+}
+
+async function readOnChainRoot(): Promise<{ root: Buffer; depth: number; seq: string }> {
+  const acct = await ConcurrentMerkleTreeAccount.fromAccountAddress(getConnection(), TREE_ADDRESS);
+  return {
+    root: Buffer.from(acct.getCurrentRoot()),
+    depth: acct.getMaxDepth(),
+    seq: acct.getCurrentSeq().toString(),
+  };
+}
+
+type DasAssetItem = {
+  id: string;
+  burnt?: boolean;
+  ownership?: { owner?: string; delegate?: string | null };
+  compression?: {
+    compressed?: boolean;
+    leaf_id?: number;
+    asset_hash?: string;
+    data_hash?: string;
+    creator_hash?: string;
+  };
+};
+
+async function fetchAllAssets(): Promise<DasAssetItem[]> {
+  const items: DasAssetItem[] = [];
+  let page = 1;
+  for (;;) {
+    const result = (await dasCallRetry("getAssetsByGroup", {
+      groupKey: "collection",
+      groupValue: COLLECTION_ADDRESS,
+      page,
+      limit: GETASSETSBYGROUP_PAGE_LIMIT,
+    })) as { items?: DasAssetItem[] };
+    const batch = result.items ?? [];
+    items.push(...batch);
+    if (batch.length < GETASSETSBYGROUP_PAGE_LIMIT) break;
+    page += 1;
+  }
+  return items;
+}
+
+/**
+ * Rebuilds the local tree from a fresh DAS snapshot and verifies it against the live on-chain
+ * root before accepting it. Returns false (leaving any prior good state in place) if the
+ * rebuild doesn't match — a stale/bad snapshot must never silently replace a known-good one.
+ */
+export async function refreshIndex(): Promise<boolean> {
+  if (_refreshing) return false;
+  _refreshing = true;
+  try {
+    const before = await readOnChainRoot();
+    const items = await fetchAllAssets();
+    const after = await readOnChainRoot();
+
+    if (!before.root.equals(after.root) || before.seq !== after.seq) {
+      console.warn("[indexer] on-chain root/seq changed mid-scan — skipping this refresh, will retry next cycle");
+      return false;
+    }
+
+    const leaves = new Map<number, Buffer>();
+    const assetsById = new Map<string, IndexedAsset>();
+    for (const item of items) {
+      const leafIndex = item.compression?.leaf_id;
+      const assetHash = item.compression?.asset_hash;
+      const owner = item.ownership?.owner;
+      const dataHash = item.compression?.data_hash;
+      const creatorHash = item.compression?.creator_hash;
+      if (leafIndex === undefined || leafIndex === null || !assetHash) continue;
+      if (item.burnt) continue; // see file header note 1
+      if (item.compression?.compressed === false) continue;
+      leaves.set(leafIndex, Buffer.from(bs58.decode(assetHash)));
+      if (owner && dataHash && creatorHash) {
+        assetsById.set(item.id, {
+          leafIndex,
+          owner,
+          delegate: item.ownership?.delegate ?? null,
+          dataHash,
+          creatorHash,
+        });
+      }
+    }
+
+    const depth = before.depth;
+    const totalSlots = 2 ** depth;
+    const leafBuffers: Buffer[] = new Array(totalSlots);
+    for (let i = 0; i < totalSlots; i++) leafBuffers[i] = leaves.get(i) ?? Buffer.alloc(32, 0);
+
+    const tree = MerkleTree.sparseMerkleTreeFromLeaves(leafBuffers, depth);
+    const computedRoot = Buffer.from(tree.root);
+
+    if (!computedRoot.equals(before.root)) {
+      console.error(
+        `[indexer] REBUILD ROOT MISMATCH — computed=${computedRoot.toString("hex")} onChain=${before.root.toString("hex")}. Refusing to replace current state.`,
+      );
+      return false;
+    }
+
+    _state = {
+      builtAtMs: Date.now(),
+      onChainRoot: before.root.toString("hex"),
+      depth,
+      leaves,
+      assetsById,
+      tree,
+    };
+    persistState(_state);
+    console.log(`[indexer] refreshed OK — ${leaves.size} live leaves, root=${_state.onChainRoot}`);
+    return true;
+  } catch (err) {
+    console.error("[indexer] refresh failed:", err instanceof Error ? err.message : err);
+    return false;
+  } finally {
+    _refreshing = false;
+  }
+}
+
+function persistState(state: IndexState): void {
+  try {
+    const serializable = {
+      builtAtMs: state.builtAtMs,
+      onChainRoot: state.onChainRoot,
+      depth: state.depth,
+      leaves: Array.from(state.leaves.entries()).map(([idx, buf]) => [idx, buf.toString("hex")]),
+      assetsById: Array.from(state.assetsById.entries()),
+    };
+    writeFileSync(resolve(process.cwd(), STATE_FILE), JSON.stringify(serializable), "utf8");
+  } catch (err) {
+    // Warm-start optimization only — refreshIndex() always re-verifies against the live
+    // on-chain root regardless, so a write failure here is non-fatal.
+    console.warn("[indexer] failed to persist state:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** Loads the last-known-good snapshot from disk on boot, WITHOUT trusting it until the next
+ *  live refresh confirms it still matches on-chain — just avoids serving nothing immediately
+ *  after a restart while the first refresh is in flight. */
+export function loadStateFromDisk(): boolean {
+  const path = resolve(process.cwd(), STATE_FILE);
+  if (_state || !existsSync(path)) return false;
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as {
+      builtAtMs: number;
+      onChainRoot: string;
+      depth: number;
+      leaves: [number, string][];
+      assetsById: [string, IndexedAsset][];
+    };
+    const leaves = new Map(raw.leaves.map(([idx, hex]) => [idx, Buffer.from(hex, "hex")]));
+    const totalSlots = 2 ** raw.depth;
+    const leafBuffers: Buffer[] = new Array(totalSlots);
+    for (let i = 0; i < totalSlots; i++) leafBuffers[i] = leaves.get(i) ?? Buffer.alloc(32, 0);
+    const tree = MerkleTree.sparseMerkleTreeFromLeaves(leafBuffers, raw.depth);
+    _state = {
+      builtAtMs: raw.builtAtMs,
+      onChainRoot: raw.onChainRoot,
+      depth: raw.depth,
+      leaves,
+      assetsById: new Map(raw.assetsById),
+      tree,
+    };
+    console.log(`[indexer] loaded state from disk (built ${new Date(raw.builtAtMs).toISOString()}) — will re-verify on next refresh`);
+    return true;
+  } catch (err) {
+    console.warn("[indexer] failed to load disk state:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+export type CompressionDataResult = {
+  assetId: string;
+  tree: string;
+  root: string; // base58
+  dataHash: string; // base58
+  creatorHash: string; // base58
+  leafIndex: number;
+  proof: string[]; // base58
+  owner: string;
+  delegate: string | null;
+};
+
+/**
+ * One-shot replacement for a client's two-call DAS pattern (getAsset + getAssetProof) —
+ * everything needed to construct or verify a Bubblegum transfer, from a single cached lookup.
+ *
+ * Deliberately does NOT make a live on-chain call per invocation — this is served straight from
+ * the in-memory cache, refreshed only on the periodic cycle. A public HTTP-facing function must
+ * not cost an external RPC call per request; that turns request volume directly into DAS-quota
+ * consumption; see getStatus()'s staleness field for how a caller can judge freshness instead.
+ * A stale/wrong proof still just fails atomically on-chain (Bubblegum itself rejects it) — no
+ * funds move — so serving a cache that's up to REFRESH_INTERVAL_MS old is an acceptable
+ * trade-off for keeping this endpoint cheap enough to expose publicly.
+ */
+export function getCompressionDataForAsset(assetId: string): CompressionDataResult | null {
+  if (!_state) return null;
+  const asset = _state.assetsById.get(assetId);
+  if (!asset) return null;
+
+  const proof = _state.tree.getProof(asset.leafIndex);
+  return {
+    assetId,
+    tree: TREE_ADDRESS.toBase58(),
+    root: bs58.encode(proof.root),
+    dataHash: asset.dataHash,
+    creatorHash: asset.creatorHash,
+    leafIndex: asset.leafIndex,
+    proof: proof.proof.map((p) => bs58.encode(p)),
+    owner: asset.owner,
+    delegate: asset.delegate,
+  };
+}
+
+/** Ownership lookup from the same cache — the bonus "does wallet X own asset Y" use case. */
+export function getOwnerOfAsset(assetId: string): { owner: string; delegate: string | null } | null {
+  const asset = _state?.assetsById.get(assetId);
+  return asset ? { owner: asset.owner, delegate: asset.delegate } : null;
+}
+
+export function getStatus(): {
+  ready: boolean;
+  builtAtMs: number | null;
+  ageMs: number | null;
+  leafCount: number;
+  root: string | null;
+} {
+  return {
+    ready: _state !== null,
+    builtAtMs: _state?.builtAtMs ?? null,
+    ageMs: _state ? Date.now() - _state.builtAtMs : null,
+    leafCount: _state?.leaves.size ?? 0,
+    root: _state?.onChainRoot ?? null,
+  };
+}
+
+/** Call once at boot. Loads any disk state for a warm start, kicks off an immediate refresh,
+ *  then keeps refreshing on the configured interval. */
+export function startIndexer(refreshIntervalMs: number): void {
+  loadStateFromDisk();
+  void refreshIndex();
+  if (_refreshTimer) clearInterval(_refreshTimer);
+  _refreshTimer = setInterval(() => void refreshIndex(), refreshIntervalMs);
+}
+
+export function stopIndexer(): void {
+  if (_refreshTimer) {
+    clearInterval(_refreshTimer);
+    _refreshTimer = null;
+  }
+}
