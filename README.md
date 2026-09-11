@@ -50,6 +50,7 @@ bun start
   (all hashes base58-encoded). 503 if the index isn't ready/is too stale, 404 if the asset isn't
   in this tree.
 - `GET /owner/:assetId` — `{ owner, delegate }` for a quick ownership check.
+- `GET /wallet/:address` — `{ owns, count, assets }` — does this wallet hold any asset in the collection, and which ones.
 
 All read-only, no auth, rate-limited per IP (see `.env.example`) — this is the same public,
 on-chain-derivable data any DAS provider already serves to anyone with an API key.

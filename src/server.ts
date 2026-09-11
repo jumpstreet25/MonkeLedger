@@ -1,6 +1,6 @@
 import express from "express";
 import { PublicKey } from "@solana/web3.js";
-import { getCompressionDataForAsset, getOwnerOfAsset, getStatus } from "./indexer";
+import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getStatus } from "./indexer";
 import { rateLimit } from "./rateLimit";
 import { PORT, BIND_HOST, REFRESH_INTERVAL_MS } from "./config";
 
@@ -57,6 +57,29 @@ export function startServer(): void {
       return;
     }
     res.json(result);
+  });
+
+  app.get("/wallet/:address", (req, res) => {
+    const { address } = req.params;
+    try {
+      new PublicKey(address);
+    } catch {
+      res.status(400).json({ error: "invalid wallet address" });
+      return;
+    }
+    const status = getStatus();
+    if (!status.ready || status.ageMs === null || status.ageMs > MAX_ACCEPTABLE_AGE_MS) {
+      res.status(503).json({ error: "index not ready or too stale — try again shortly" });
+      return;
+    }
+    const assets = getAssetsOwnedByWallet(address);
+    // assets is only null when the index itself isn't ready, already handled by the status
+    // check above — this branch is unreachable in practice but keeps the type honest.
+    if (assets === null) {
+      res.status(503).json({ error: "index not ready" });
+      return;
+    }
+    res.json({ owns: assets.length > 0, count: assets.length, assets });
   });
 
   const server = app.listen(PORT, BIND_HOST, () => {

@@ -55,6 +55,7 @@ type IndexState = {
   depth: number;
   leaves: Map<number, Buffer>; // leafIndex -> asset_hash (raw 32 bytes)
   assetsById: Map<string, IndexedAsset>;
+  byOwner: Map<string, string[]>; // owner wallet -> assetIds (reverse index, for "does wallet X own any")
   tree: MerkleTree;
 };
 
@@ -170,6 +171,7 @@ export async function refreshIndex(): Promise<boolean> {
       depth,
       leaves,
       assetsById,
+      byOwner: buildOwnerIndex(assetsById),
       tree,
     };
     persistState(_state);
@@ -181,6 +183,16 @@ export async function refreshIndex(): Promise<boolean> {
   } finally {
     _refreshing = false;
   }
+}
+
+function buildOwnerIndex(assetsById: Map<string, IndexedAsset>): Map<string, string[]> {
+  const byOwner = new Map<string, string[]>();
+  for (const [assetId, asset] of assetsById) {
+    const existing = byOwner.get(asset.owner);
+    if (existing) existing.push(assetId);
+    else byOwner.set(asset.owner, [assetId]);
+  }
+  return byOwner;
 }
 
 function persistState(state: IndexState): void {
@@ -219,12 +231,14 @@ export function loadStateFromDisk(): boolean {
     const leafBuffers: Buffer[] = new Array(totalSlots);
     for (let i = 0; i < totalSlots; i++) leafBuffers[i] = leaves.get(i) ?? Buffer.alloc(32, 0);
     const tree = MerkleTree.sparseMerkleTreeFromLeaves(leafBuffers, raw.depth);
+    const assetsById = new Map(raw.assetsById);
     _state = {
       builtAtMs: raw.builtAtMs,
       onChainRoot: raw.onChainRoot,
       depth: raw.depth,
       leaves,
-      assetsById: new Map(raw.assetsById),
+      assetsById,
+      byOwner: buildOwnerIndex(assetsById),
       tree,
     };
     console.log(`[indexer] loaded state from disk (built ${new Date(raw.builtAtMs).toISOString()}) — will re-verify on next refresh`);
@@ -282,6 +296,15 @@ export function getCompressionDataForAsset(assetId: string): CompressionDataResu
 export function getOwnerOfAsset(assetId: string): { owner: string; delegate: string | null } | null {
   const asset = _state?.assetsById.get(assetId);
   return asset ? { owner: asset.owner, delegate: asset.delegate } : null;
+}
+
+/** Reverse lookup — "does wallet W own any asset in this collection". Returns an empty array
+ *  (not null) for a wallet that holds none; null only when the index itself isn't ready yet, so
+ *  callers can distinguish "confirmed zero" from "couldn't check" the same way the existing
+ *  Helius-chain callers already do (never treat an unready index as a confirmed non-holder). */
+export function getAssetsOwnedByWallet(owner: string): string[] | null {
+  if (!_state) return null;
+  return _state.byOwner.get(owner) ?? [];
 }
 
 export function getStatus(): {
