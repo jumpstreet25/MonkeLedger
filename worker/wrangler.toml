@@ -9,5 +9,10 @@ compatibility_date = "2026-03-23"
 #
 # BACKEND_ORIGIN is a plain var, not a secret, because it's a public IP:port that's already
 # openly reachable directly — this Worker doesn't add any confidentiality, just fronting.
+#
+# Uses nip.io (a free wildcard-DNS service: <ip-with-dashes>.nip.io resolves to that literal IP)
+# rather than the bare IP — Cloudflare Workers' fetch() refuses to target a raw IP address
+# directly (error 1003), so this needs to look like a hostname even though it resolves to the
+# exact same address.
 [vars]
-BACKEND_ORIGIN = "http://157.173.192.39:3002"
+BACKEND_ORIGIN = "http://157-173-192-39.nip.io:3002"
