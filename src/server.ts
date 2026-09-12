@@ -1,6 +1,6 @@
 import express from "express";
 import { PublicKey } from "@solana/web3.js";
-import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getStatus } from "./indexer";
+import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, getStatus } from "./indexer";
 import { rateLimit } from "./rateLimit";
 import { PORT, BIND_HOST, REFRESH_INTERVAL_MS } from "./config";
 
@@ -52,6 +52,22 @@ export function startServer(): void {
       return;
     }
     const result = getOwnerOfAsset(assetId);
+    if (!result) {
+      res.status(404).json({ error: "asset not found in index" });
+      return;
+    }
+    res.json(result);
+  });
+
+  app.get("/metadata/:assetId", (req, res) => {
+    const { assetId } = req.params;
+    try {
+      new PublicKey(assetId);
+    } catch {
+      res.status(400).json({ error: "invalid assetId" });
+      return;
+    }
+    const result = getMetadataForAsset(assetId);
     if (!result) {
       res.status(404).json({ error: "asset not found in index" });
       return;

@@ -41,12 +41,22 @@ import {
   GETASSETSBYGROUP_PAGE_LIMIT,
 } from "./config";
 
+export type NftTrait = { trait_type: string; value: string };
+
 type IndexedAsset = {
   leafIndex: number;
   owner: string;
   delegate: string | null;
   dataHash: string; // base58
   creatorHash: string; // base58
+  // Display metadata — Helius has already resolved and fetched this (the Arweave JSON behind
+  // json_uri) as part of the SAME getAssetsByGroup call we make every refresh anyway. No extra
+  // API cost to capture it; this is what lets MonkeLedger answer "what traits does this Monke
+  // have" without a live per-request Helius getAsset call.
+  name: string | null;
+  symbol: string | null;
+  image: string | null;
+  traits: NftTrait[] | null;
 };
 
 type IndexState = {
@@ -88,6 +98,14 @@ type DasAssetItem = {
     asset_hash?: string;
     data_hash?: string;
     creator_hash?: string;
+  };
+  content?: {
+    metadata?: {
+      name?: string;
+      symbol?: string;
+      attributes?: NftTrait[];
+    };
+    files?: { uri?: string }[];
   };
 };
 
@@ -146,6 +164,10 @@ export async function refreshIndex(): Promise<boolean> {
           delegate: item.ownership?.delegate ?? null,
           dataHash,
           creatorHash,
+          name: item.content?.metadata?.name ?? null,
+          symbol: item.content?.metadata?.symbol ?? null,
+          image: item.content?.files?.[0]?.uri ?? null,
+          traits: item.content?.metadata?.attributes ?? null,
         });
       }
     }
@@ -296,6 +318,22 @@ export function getCompressionDataForAsset(assetId: string): CompressionDataResu
 export function getOwnerOfAsset(assetId: string): { owner: string; delegate: string | null } | null {
   const asset = _state?.assetsById.get(assetId);
   return asset ? { owner: asset.owner, delegate: asset.delegate } : null;
+}
+
+export type AssetMetadata = {
+  name: string | null;
+  symbol: string | null;
+  image: string | null;
+  traits: NftTrait[] | null;
+};
+
+/** Display metadata (name/image/traits) — Helius already resolved this as part of the same
+ *  getAssetsByGroup call refreshIndex() makes anyway, so this costs nothing beyond what
+ *  MonkeLedger already spends. Returns null only if the asset isn't in the index at all. */
+export function getMetadataForAsset(assetId: string): AssetMetadata | null {
+  const asset = _state?.assetsById.get(assetId);
+  if (!asset) return null;
+  return { name: asset.name, symbol: asset.symbol, image: asset.image, traits: asset.traits };
 }
 
 /** Reverse lookup — "does wallet W own any asset in this collection". Returns an empty array
