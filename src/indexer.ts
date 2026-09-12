@@ -35,6 +35,7 @@ import bs58 from "bs58";
 import { dasCallRetry } from "./dasClient";
 import {
   RPC_URL,
+  POLL_RPC_URL,
   TREE_ADDRESS,
   COLLECTION_ADDRESS,
   STATE_FILE,
@@ -71,6 +72,7 @@ type IndexState = {
 
 let _state: IndexState | null = null;
 let _refreshing = false; // reentrancy guard — a setInterval-driven job must never overlap itself
+let _pollTimer: ReturnType<typeof setInterval> | null = null;
 let _refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 let _connection: Connection | null = null;
@@ -79,13 +81,43 @@ function getConnection(): Connection {
   return _connection;
 }
 
-async function readOnChainRoot(): Promise<{ root: Buffer; depth: number; seq: string }> {
-  const acct = await ConcurrentMerkleTreeAccount.fromAccountAddress(getConnection(), TREE_ADDRESS);
+// Separate connection for the cheap/frequent polling leg — deliberately NOT the Helius-backed
+// RPC_URL above, since getAccountInfo (what reading the root actually is) doesn't need DAS at
+// all. Keeping this on a different endpoint means the frequent poll never touches the Helius key
+// or its quota, regardless of how often it runs.
+let _pollConnection: Connection | null = null;
+function getPollConnection(): Connection {
+  if (!_pollConnection) _pollConnection = new Connection(POLL_RPC_URL, "confirmed");
+  return _pollConnection;
+}
+
+async function readOnChainRoot(connection: Connection = getConnection()): Promise<{ root: Buffer; depth: number; seq: string }> {
+  const acct = await ConcurrentMerkleTreeAccount.fromAccountAddress(connection, TREE_ADDRESS);
   return {
     root: Buffer.from(acct.getCurrentRoot()),
     depth: acct.getMaxDepth(),
     seq: acct.getCurrentSeq().toString(),
   };
+}
+
+/**
+ * Cheap change-detector: reads just the on-chain root (no DAS call, no full snapshot) and
+ * compares it to what's currently indexed. Only triggers the expensive refreshIndex() when the
+ * root has actually moved — with low transfer volume, this means most poll cycles cost nothing
+ * beyond one plain RPC call, instead of a full ~13-request DAS scan regardless of whether
+ * anything changed.
+ */
+export async function pollForChange(): Promise<void> {
+  if (_refreshing) return;
+  try {
+    const live = await readOnChainRoot(getPollConnection());
+    const liveHex = live.root.toString("hex");
+    if (_state && liveHex === _state.onChainRoot) return; // no change — nothing to do
+    console.log(`[indexer] root change detected (or no state yet) — running full refresh`);
+    await refreshIndex();
+  } catch (err) {
+    console.warn("[indexer] poll failed:", err instanceof Error ? err.message : err);
+  }
 }
 
 type DasAssetItem = {
@@ -394,14 +426,26 @@ export function getStatus(): {
 
 /** Call once at boot. Loads any disk state for a warm start, kicks off an immediate refresh,
  *  then keeps refreshing on the configured interval. */
-export function startIndexer(refreshIntervalMs: number): void {
+/**
+ * Call once at boot. Loads any disk state for a warm start, does an initial full refresh, then
+ * runs two independent timers: a frequent cheap poll that only escalates to a full refresh when
+ * the on-chain root has actually changed, and an infrequent full refresh as a safety net in case
+ * polling ever misses something (wrong RPC, transient bug, etc.).
+ */
+export function startIndexer(pollIntervalMs: number, refreshIntervalMs: number): void {
   loadStateFromDisk();
   void refreshIndex();
+  if (_pollTimer) clearInterval(_pollTimer);
   if (_refreshTimer) clearInterval(_refreshTimer);
+  _pollTimer = setInterval(() => void pollForChange(), pollIntervalMs);
   _refreshTimer = setInterval(() => void refreshIndex(), refreshIntervalMs);
 }
 
 export function stopIndexer(): void {
+  if (_pollTimer) {
+    clearInterval(_pollTimer);
+    _pollTimer = null;
+  }
   if (_refreshTimer) {
     clearInterval(_refreshTimer);
     _refreshTimer = null;

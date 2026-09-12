@@ -23,17 +23,28 @@ a wrong one.
 
 ## How it works
 
-1. On a timer (default 10 min), fetch every asset in the configured collection via DAS
-   `getAssetsByGroup`, and read the tree's current root twice (before and after the fetch) to
-   confirm nothing changed on-chain mid-scan.
-2. Rebuild a local Merkle tree from that snapshot (same padding/hashing convention as
+A full collection snapshot is the expensive step (a paginated DAS `getAssetsByGroup` scan — ~11
+requests for a 10k-asset collection), so it's decoupled from a much cheaper, more frequent check
+of whether anything even happened:
+
+1. Every `POLL_INTERVAL_MS` (default 2 min), read just the tree's current on-chain root — a plain
+   `getAccountInfo`, not a DAS call, and by default not even against Helius (see `POLL_RPC_URL`).
+   If it matches what's already indexed, stop there — nothing else happens.
+2. Only when the root has actually changed: fetch every asset in the collection via DAS
+   `getAssetsByGroup`, reading the root again before and after to confirm nothing changed on-chain
+   mid-scan.
+3. Rebuild a local Merkle tree from that snapshot (same padding/hashing convention as
    `@solana/spl-account-compression`'s own tree implementation — burned leaves are excluded, since
    DAS keeps a stale hash for them forever even after the true on-chain leaf is zeroed).
-3. Compare the rebuilt root to the live on-chain root. If they don't match, the refresh is
+4. Compare the rebuilt root to the live on-chain root. If they don't match, the refresh is
    discarded and the previous known-good state stays in place.
-4. Serve proofs from the verified in-memory cache — no live RPC call per request, so request
+5. Serve proofs from the verified in-memory cache — no live RPC call per request, so request
    volume never translates into DAS-provider cost. A `/status` age check refuses to serve if the
    cache is stale beyond a safety threshold.
+6. A separate, infrequent `REFRESH_INTERVAL_MS` (default 1h) full re-sync runs regardless, as a
+   safety net in case the poll loop ever misses a change (wrong RPC, a transient bug) — for a
+   collection with real transfer volume, the poll loop should catch everything long before this
+   ever fires.
 
 ## Running it
 
