@@ -1,0 +1,13 @@
+name = "monkeledger"
+main = "src/index.ts"
+compatibility_date = "2026-03-23"
+
+# Reverse proxy in front of the MonkeLedger backend (see ../src for that service). Gives the
+# backend a real HTTPS URL, Cloudflare's edge as a shock absorber in front of a VPS process that
+# is deliberately resource-capped (see ../README.md), and a stable public address independent of
+# wherever the backend happens to be hosted.
+#
+# BACKEND_ORIGIN is a plain var, not a secret, because it's a public IP:port that's already
+# openly reachable directly — this Worker doesn't add any confidentiality, just fronting.
+[vars]
+BACKEND_ORIGIN = "http://157.173.192.39:3002"

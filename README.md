@@ -75,3 +75,21 @@ Runs as a single always-on process (systemd, pm2, a container — whatever you a
 should run as its OWN process, separate from anything latency- or uptime-sensitive you operate —
 the whole point is that nothing which happens to this service (a traffic spike, a crash, a stuck
 refresh) can ever affect anything else.
+
+## Public URL (optional Cloudflare Worker front)
+
+`worker/` is a small Cloudflare Worker that reverse-proxies to the backend above, giving it a real
+HTTPS URL (a raw `http://ip:port` looks bad and is one more thing to keep secret/stable) plus
+Cloudflare's edge as a shock absorber in front of a deliberately resource-capped VPS process.
+Entirely optional — the backend works fine addressed directly.
+
+```bash
+cd worker
+npm install
+npx wrangler secret put PROXY_SECRET   # generate with e.g. `openssl rand -hex 32`
+npx wrangler deploy
+```
+
+Then set the same value as `PROXY_SECRET` in the backend's `.env` and restart it — this lets the
+backend trust the real client IP the Worker forwards for rate-limiting purposes, without letting
+a direct caller (the backend's port is still openly reachable) spoof one to dodge its own limit.

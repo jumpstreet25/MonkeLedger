@@ -7,9 +7,22 @@
  * process's own CPU/memory/socket budget).
  */
 import type { Request, Response, NextFunction } from "express";
-import { RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } from "./config";
+import { RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, PROXY_SECRET } from "./config";
 
 const hits = new Map<string, { count: number; windowStart: number }>();
+
+/** The Worker (worker/src/index.ts) fronts this service and forwards the real client IP via
+ *  X-Forwarded-For, authenticated with X-Proxy-Secret so a direct caller (this port is still
+ *  openly reachable — see README) can't spoof an IP to dodge its own limit. Falls back to the
+ *  raw socket address for direct/unproxied requests. */
+function resolveClientIp(req: Request): string {
+  if (PROXY_SECRET && req.headers["x-proxy-secret"] === PROXY_SECRET) {
+    const forwarded = req.headers["x-forwarded-for"];
+    const ip = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+    if (ip) return ip;
+  }
+  return req.socket.remoteAddress ?? "unknown";
+}
 
 // Prevent unbounded growth from a flood of distinct/spoofed source IPs.
 const MAX_TRACKED_IPS = 50_000;
@@ -22,7 +35,7 @@ setInterval(() => {
 }, RATE_LIMIT_WINDOW_MS).unref();
 
 export function rateLimit(req: Request, res: Response, next: NextFunction): void {
-  const ip = req.socket.remoteAddress ?? "unknown";
+  const ip = resolveClientIp(req);
   const now = Date.now();
   let entry = hits.get(ip);
   if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {

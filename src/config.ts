@@ -20,5 +20,9 @@ export const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS ?? "
 export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? "30", 10);
 export const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? "60000", 10);
 
+// Optional — only needed if running the Cloudflare Worker (see worker/) in front of this
+// service. Leave unset to run standalone; rate limiting then just uses the direct socket IP.
+export const PROXY_SECRET = process.env.PROXY_SECRET ?? "";
+
 export const STATE_FILE = ".ledger_state.json";
 export const GETASSETSBYGROUP_PAGE_LIMIT = 1000;
