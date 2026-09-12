@@ -26,8 +26,11 @@ export const BIND_HOST = process.env.BIND_HOST ?? "0.0.0.0";
 export const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? "120000", 10);
 
 // Safety-net full refresh even if polling somehow misses a change (wrong RPC, a transient bug,
-// etc.) — infrequent by design now that the poll loop is what actually catches real changes.
-export const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS ?? "3600000", 10);
+// etc.) — the poll loop is a comprehensive change-detector on its own (ANY leaf mutation —
+// transfer, metadata update, burn, delegate — changes that leaf's hash and therefore the root,
+// so polling the root catches all of them, not just transfers), so this is a rare backstop, not
+// a routine sync. Default 24h; tighten if you ever have reason to distrust the poll loop.
+export const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS ?? "86400000", 10);
 
 export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? "30", 10);
 export const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? "60000", 10);

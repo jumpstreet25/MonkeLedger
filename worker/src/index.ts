@@ -24,7 +24,7 @@ const LANDING_PAGE = `<!DOCTYPE html>
 <body>
   <h1>🐒 MonkeLedger</h1>
   <p class="sub">A self-hosted Merkle-proof-serving replica for the Saga Monkes compressed-NFT tree.</p>
-  <p>Rebuilds its own copy of the tree from a DAS snapshot every 10 minutes, independently verifies it against the live on-chain root, and serves proofs/ownership/metadata from that verified cache — no live third-party API call per request. Source: <a href="https://github.com/jumpstreet25/MonkeLedger">github.com/jumpstreet25/MonkeLedger</a>.</p>
+  <p>Watches for on-chain changes continuously (cheap root polling, ~2 min) and only re-scans the full collection when something actually moved, independently verifies the rebuild against the live on-chain root, and serves proofs/ownership/metadata from that verified cache — no live third-party API call per request. Source: <a href="https://github.com/jumpstreet25/MonkeLedger">github.com/jumpstreet25/MonkeLedger</a>.</p>
   <table>
     <tr><th>Endpoint</th><th>What it does</th></tr>
     <tr><td><a href="/status"><code>GET /status</code></a></td><td>Index health: ready, age, leaf count, current root.</td></tr>
@@ -70,11 +70,22 @@ export default {
 
     // Re-wrap the response so we control caching/CORS headers rather than passing the backend's
     // through verbatim — this is public read-only data, safe to allow browser fetches from
-    // anywhere, and safe to let Cloudflare cache briefly (the index itself only refreshes every
-    // 10 min, so a short edge cache costs nothing in freshness).
+    // anywhere. Cache TTL varies by how volatile the endpoint actually is:
+    //   - /export, /metadata: display data that only changes on a rare on-chain metadata update
+    //     — safe to cache generously.
+    //   - /wallet, /owner, /compression: ownership/proof data — short cache only, enough to
+    //     absorb a burst of identical requests without meaningfully risking staleness beyond
+    //     what the backend's own freshness check already tolerates.
+    //   - /status, /health: exist specifically to report LIVE state — never cache.
     const responseHeaders = new Headers(proxied.headers);
     responseHeaders.set("access-control-allow-origin", "*");
-    responseHeaders.set("cache-control", "public, max-age=30");
+    if (url.pathname.startsWith("/export") || url.pathname.startsWith("/metadata/")) {
+      responseHeaders.set("cache-control", "public, max-age=300");
+    } else if (url.pathname === "/status" || url.pathname === "/health") {
+      responseHeaders.set("cache-control", "no-store");
+    } else {
+      responseHeaders.set("cache-control", "public, max-age=10");
+    }
 
     return new Response(proxied.body, { status: proxied.status, headers: responseHeaders });
   },

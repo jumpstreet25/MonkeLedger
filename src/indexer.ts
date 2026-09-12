@@ -34,7 +34,6 @@ import { ConcurrentMerkleTreeAccount, MerkleTree } from "@solana/spl-account-com
 import bs58 from "bs58";
 import { dasCallRetry } from "./dasClient";
 import {
-  RPC_URL,
   POLL_RPC_URL,
   TREE_ADDRESS,
   COLLECTION_ADDRESS,
@@ -75,23 +74,16 @@ let _refreshing = false; // reentrancy guard — a setInterval-driven job must n
 let _pollTimer: ReturnType<typeof setInterval> | null = null;
 let _refreshTimer: ReturnType<typeof setInterval> | null = null;
 
-let _connection: Connection | null = null;
-function getConnection(): Connection {
-  if (!_connection) _connection = new Connection(RPC_URL, "confirmed");
-  return _connection;
-}
-
-// Separate connection for the cheap/frequent polling leg — deliberately NOT the Helius-backed
-// RPC_URL above, since getAccountInfo (what reading the root actually is) doesn't need DAS at
-// all. Keeping this on a different endpoint means the frequent poll never touches the Helius key
-// or its quota, regardless of how often it runs.
+// Root reads are plain getAccountInfo, not a DAS call — no reason to spend the Helius-backed
+// RPC_URL on them (that's reserved for getAssetsByGroup, via dasClient.ts). Both the frequent
+// poll and refreshIndex()'s own before/after checks use this connection.
 let _pollConnection: Connection | null = null;
 function getPollConnection(): Connection {
   if (!_pollConnection) _pollConnection = new Connection(POLL_RPC_URL, "confirmed");
   return _pollConnection;
 }
 
-async function readOnChainRoot(connection: Connection = getConnection()): Promise<{ root: Buffer; depth: number; seq: string }> {
+async function readOnChainRoot(connection: Connection): Promise<{ root: Buffer; depth: number; seq: string }> {
   const acct = await ConcurrentMerkleTreeAccount.fromAccountAddress(connection, TREE_ADDRESS);
   return {
     root: Buffer.from(acct.getCurrentRoot()),
@@ -168,9 +160,11 @@ export async function refreshIndex(): Promise<boolean> {
   if (_refreshing) return false;
   _refreshing = true;
   try {
-    const before = await readOnChainRoot();
+    // Root reads are plain getAccountInfo, not DAS — same reasoning as pollForChange() above,
+    // no need to spend a Helius-backed request on these when the free RPC does the job.
+    const before = await readOnChainRoot(getPollConnection());
     const items = await fetchAllAssets();
-    const after = await readOnChainRoot();
+    const after = await readOnChainRoot(getPollConnection());
 
     if (!before.root.equals(after.root) || before.seq !== after.seq) {
       console.warn("[indexer] on-chain root/seq changed mid-scan — skipping this refresh, will retry next cycle");
@@ -190,16 +184,22 @@ export async function refreshIndex(): Promise<boolean> {
       if (item.compression?.compressed === false) continue;
       leaves.set(leafIndex, Buffer.from(bs58.decode(assetHash)));
       if (owner && dataHash && creatorHash) {
+        // A transfer/delegate change touches owner + hashes, never display metadata — but a
+        // single flaky DAS response CAN come back with content.metadata missing/empty for
+        // reasons that have nothing to do with the asset itself (Helius's own Arweave-fetch
+        // hiccup, a slow page, etc.). Overlay onto whatever we already had rather than blanking
+        // a previously-known name/image/traits just because one page didn't include them.
+        const previous = _state?.assetsById.get(item.id);
         assetsById.set(item.id, {
           leafIndex,
           owner,
           delegate: item.ownership?.delegate ?? null,
           dataHash,
           creatorHash,
-          name: item.content?.metadata?.name ?? null,
-          symbol: item.content?.metadata?.symbol ?? null,
-          image: item.content?.files?.[0]?.uri ?? null,
-          traits: item.content?.metadata?.attributes ?? null,
+          name: item.content?.metadata?.name ?? previous?.name ?? null,
+          symbol: item.content?.metadata?.symbol ?? previous?.symbol ?? null,
+          image: item.content?.files?.[0]?.uri ?? previous?.image ?? null,
+          traits: item.content?.metadata?.attributes ?? previous?.traits ?? null,
         });
       }
     }
