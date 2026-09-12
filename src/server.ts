@@ -1,6 +1,6 @@
 import express from "express";
 import { PublicKey } from "@solana/web3.js";
-import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, exportAll, getStatus } from "./indexer";
+import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, exportAll, getHolders, getStatus } from "./indexer";
 import { rateLimit } from "./rateLimit";
 import { PORT, BIND_HOST, REFRESH_INTERVAL_MS } from "./config";
 
@@ -32,6 +32,19 @@ export function startServer(): void {
       return;
     }
     res.json(exportAll());
+  });
+
+  // Same shape as /export, but with current owner+delegate included — for a holder census or
+  // rebuilding a wallet-keyed index, where you need ownership and metadata together in one pull
+  // instead of stitching /export + N /wallet calls yourself. Ownership changes far more often
+  // than /export's fields, so don't cache this as long as /export.
+  app.get("/holders", (_req, res) => {
+    const status = getStatus();
+    if (!status.ready) {
+      res.status(503).json({ error: "index not ready — try again shortly" });
+      return;
+    }
+    res.json(getHolders());
   });
 
   app.get("/compression/:assetId", (req, res) => {

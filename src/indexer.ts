@@ -399,6 +399,33 @@ export function exportAll(): ExportRow[] {
   return rows;
 }
 
+export type HolderRow = ExportRow & { owner: string; delegate: string | null };
+
+/**
+ * Same data as exportAll(), but WITH ownership — for consumers that specifically need
+ * owner+metadata together (a holder census, rebuilding a wallet-keyed index) rather than a
+ * static per-asset reference. Deliberately a separate endpoint from /export rather than a flag
+ * on it: ownership changes far more often, so this should never be cached as long as /export is.
+ */
+export function getHolders(): HolderRow[] {
+  if (!_state) return [];
+  const rows: HolderRow[] = [];
+  for (const [mint, asset] of _state.assetsById) {
+    const match = asset.name?.match(/#(\d+)/);
+    rows.push({
+      number: match ? parseInt(match[1], 10) : null,
+      name: asset.name,
+      mint,
+      image: asset.image,
+      traits: asset.traits,
+      owner: asset.owner,
+      delegate: asset.delegate,
+    });
+  }
+  rows.sort((a, b) => (a.number ?? Infinity) - (b.number ?? Infinity));
+  return rows;
+}
+
 /** Reverse lookup — "does wallet W own any asset in this collection". Returns an empty array
  *  (not null) for a wallet that holds none; null only when the index itself isn't ready yet, so
  *  callers can distinguish "confirmed zero" from "couldn't check" the same way the existing

@@ -66,6 +66,7 @@ bun start
 - `GET /wallet/:address` — `{ owns, count, assets }` — does this wallet hold any asset in the collection, and which ones.
 - `GET /metadata/:assetId` — `{ name, symbol, image, traits }` — display metadata, captured for free from the same DAS snapshot used to build the tree (Helius resolves the Arweave JSON on its end; we just save what it already hands us instead of re-fetching per request).
 - `GET /export` — the full collection as one static array: `[{ number, name, mint, image, traits }, ...]`, sorted by number. Ownership isn't included — it changes far too often for a static file; use `/wallet`/`/owner` for that. Everything else here (traits, image, mint) is effectively fixed for an existing asset.
+- `GET /holders` — same shape as `/export` plus current `owner`/`delegate` per row. For a holder census or rebuilding a wallet-keyed index in one pull instead of stitching `/export` + N `/wallet` calls yourself. Cached far more briefly than `/export` since ownership changes much more often.
 
 All read-only, no auth, rate-limited per IP (see `.env.example`) — this is the same public,
 on-chain-derivable data any DAS provider already serves to anyone with an API key.

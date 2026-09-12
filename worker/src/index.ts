@@ -33,6 +33,7 @@ const LANDING_PAGE = `<!DOCTYPE html>
     <tr><td><code>GET /owner/:assetId</code></td><td>Current owner + delegate for one asset.</td></tr>
     <tr><td><code>GET /wallet/:address</code></td><td>Does this wallet hold any Saga Monke, and which ones.</td></tr>
     <tr><td><code>GET /metadata/:assetId</code></td><td>Name, image, and traits for one asset.</td></tr>
+    <tr><td><a href="/holders"><code>GET /holders</code></a></td><td>Same as /export, but with current owner+delegate included — for a holder census or rebuilding a wallet-keyed index in one pull.</td></tr>
   </table>
   <p>All endpoints are read-only, public, and rate-limited. This is the same public, on-chain-derivable data any DAS provider already serves — nothing here is private.</p>
   <footer>Fronted by Cloudflare in front of an isolated, resource-capped backend process.</footer>
