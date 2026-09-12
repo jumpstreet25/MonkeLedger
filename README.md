@@ -1,5 +1,7 @@
 # MonkeLedger
 
+**Live instance (Saga Monkes): https://monkeledger.jumpstreet25.workers.dev**
+
 A self-hosted Merkle-proof-serving replica for a compressed-NFT (cNFT) tree on Solana.
 
 ## Why this exists
@@ -78,10 +80,11 @@ refresh) can ever affect anything else.
 
 ## Public URL (optional Cloudflare Worker front)
 
-`worker/` is a small Cloudflare Worker that reverse-proxies to the backend above, giving it a real
+The Saga Monkes instance above (https://monkeledger.jumpstreet25.workers.dev) is running exactly
+this: `worker/` is a small Cloudflare Worker that reverse-proxies to the backend, giving it a real
 HTTPS URL (a raw `http://ip:port` looks bad and is one more thing to keep secret/stable) plus
 Cloudflare's edge as a shock absorber in front of a deliberately resource-capped VPS process.
-Entirely optional — the backend works fine addressed directly.
+Entirely optional for your own fork — the backend works fine addressed directly too.
 
 ```bash
 cd worker
