@@ -336,6 +336,37 @@ export function getMetadataForAsset(assetId: string): AssetMetadata | null {
   return { name: asset.name, symbol: asset.symbol, image: asset.image, traits: asset.traits };
 }
 
+export type ExportRow = {
+  number: number | null; // parsed from "MONKE #N" — null if name doesn't match that pattern
+  name: string | null;
+  mint: string; // assetId
+  image: string | null;
+  traits: NftTrait[] | null;
+};
+
+/** Full static dump — number, mint, traits, and the current Arweave image URL for every live
+ *  asset in the index. This is exactly "the helper file": a fixed mapping that's cheap to build
+ *  once from data MonkeLedger already has, since none of it (traits, image, mint) changes for an
+ *  existing asset except on the rare metadata-update event — ownership/ownership-adjacent data
+ *  (who currently holds it) deliberately isn't part of this export; that's what /wallet and
+ *  /owner are for, and it changes far too often to bake into a static file. */
+export function exportAll(): ExportRow[] {
+  if (!_state) return [];
+  const rows: ExportRow[] = [];
+  for (const [mint, asset] of _state.assetsById) {
+    const match = asset.name?.match(/#(\d+)/);
+    rows.push({
+      number: match ? parseInt(match[1], 10) : null,
+      name: asset.name,
+      mint,
+      image: asset.image,
+      traits: asset.traits,
+    });
+  }
+  rows.sort((a, b) => (a.number ?? Infinity) - (b.number ?? Infinity));
+  return rows;
+}
+
 /** Reverse lookup — "does wallet W own any asset in this collection". Returns an empty array
  *  (not null) for a wallet that holds none; null only when the index itself isn't ready yet, so
  *  callers can distinguish "confirmed zero" from "couldn't check" the same way the existing

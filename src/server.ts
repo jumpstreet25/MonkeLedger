@@ -1,6 +1,6 @@
 import express from "express";
 import { PublicKey } from "@solana/web3.js";
-import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, getStatus } from "./indexer";
+import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, exportAll, getStatus } from "./indexer";
 import { rateLimit } from "./rateLimit";
 import { PORT, BIND_HOST, REFRESH_INTERVAL_MS } from "./config";
 
@@ -20,6 +20,18 @@ export function startServer(): void {
 
   app.get("/status", (_req, res) => {
     res.json(getStatus());
+  });
+
+  // "The helper file" — a full static dump (number, mint, traits, current Arweave image URL) for
+  // every live asset. Ownership deliberately isn't included here; it changes too often for a
+  // static file and is what /wallet and /owner are for.
+  app.get("/export", (_req, res) => {
+    const status = getStatus();
+    if (!status.ready) {
+      res.status(503).json({ error: "index not ready — try again shortly" });
+      return;
+    }
+    res.json(exportAll());
   });
 
   app.get("/compression/:assetId", (req, res) => {
