@@ -34,6 +34,7 @@ const LANDING_PAGE = `<!DOCTYPE html>
     <tr><td><code>GET /wallet/:address</code></td><td>Does this wallet hold any Saga Monke, and which ones.</td></tr>
     <tr><td><code>GET /metadata/:assetId</code></td><td>Name, image, and traits for one asset.</td></tr>
     <tr><td><a href="/holders"><code>GET /holders</code></a></td><td>Same as /export, but with current owner+delegate included — for a holder census or rebuilding a wallet-keyed index in one pull.</td></tr>
+    <tr><td><a href="/burnt"><code>GET /burnt</code></a></td><td>The memorial list — every Monke ever burnt, with its last-known number/name/traits (image where known).</td></tr>
   </table>
   <p>All endpoints are read-only, public, and rate-limited. This is the same public, on-chain-derivable data any DAS provider already serves — nothing here is private.</p>
   <footer>Fronted by Cloudflare in front of an isolated, resource-capped backend process.</footer>
@@ -72,15 +73,15 @@ export default {
     // Re-wrap the response so we control caching/CORS headers rather than passing the backend's
     // through verbatim — this is public read-only data, safe to allow browser fetches from
     // anywhere. Cache TTL varies by how volatile the endpoint actually is:
-    //   - /export, /metadata: display data that only changes on a rare on-chain metadata update
-    //     — safe to cache generously.
+    //   - /export, /metadata, /burnt: display data that only changes on a rare on-chain metadata
+    //     update (or, for /burnt, an even rarer new burn) — safe to cache generously.
     //   - /wallet, /owner, /compression: ownership/proof data — short cache only, enough to
     //     absorb a burst of identical requests without meaningfully risking staleness beyond
     //     what the backend's own freshness check already tolerates.
     //   - /status, /health: exist specifically to report LIVE state — never cache.
     const responseHeaders = new Headers(proxied.headers);
     responseHeaders.set("access-control-allow-origin", "*");
-    if (url.pathname.startsWith("/export") || url.pathname.startsWith("/metadata/")) {
+    if (url.pathname.startsWith("/export") || url.pathname.startsWith("/metadata/") || url.pathname === "/burnt") {
       responseHeaders.set("cache-control", "public, max-age=300");
     } else if (url.pathname === "/status" || url.pathname === "/health") {
       responseHeaders.set("cache-control", "no-store");

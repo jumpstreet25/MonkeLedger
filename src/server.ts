@@ -1,6 +1,6 @@
 import express from "express";
 import { PublicKey } from "@solana/web3.js";
-import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, exportAll, getHolders, getStatus } from "./indexer";
+import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, exportAll, getHolders, getStatus, getBurnt } from "./indexer";
 import { rateLimit } from "./rateLimit";
 import { PORT, BIND_HOST, REFRESH_INTERVAL_MS } from "./config";
 
@@ -45,6 +45,13 @@ export function startServer(): void {
       return;
     }
     res.json(getHolders());
+  });
+
+  // The memorial list — every Monke ever burnt (backfilled + live-captured), with its last-known
+  // name/image/traits. Always available once the process has booted (loaded synchronously before
+  // the server starts listening) — no readiness gate needed like the live-index endpoints.
+  app.get("/burnt", (_req, res) => {
+    res.json(getBurnt());
   });
 
   app.get("/compression/:assetId", (req, res) => {

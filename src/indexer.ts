@@ -39,6 +39,8 @@ import {
   COLLECTION_ADDRESS,
   STATE_FILE,
   GETASSETSBYGROUP_PAGE_LIMIT,
+  BURNT_STATE_FILE,
+  BURNT_SEED_FILE,
 } from "./config";
 
 export type NftTrait = { trait_type: string; value: string };
@@ -69,7 +71,18 @@ type IndexState = {
   tree: MerkleTree;
 };
 
+export type BurntAsset = {
+  number: number | null; // parsed from "MONKE #N"
+  name: string | null;
+  mint: string; // assetId
+  image: string | null;
+  traits: NftTrait[] | null;
+  lastSeenLeafIndex: number | null;
+  burnedAtMs: number | null; // when THIS indexer first observed the burn — null for seeded/backfilled entries with no known burn time
+};
+
 let _state: IndexState | null = null;
+let _burnt: Map<string, BurntAsset> = new Map(); // assetId -> last-known metadata, grows monotonically
 let _refreshing = false; // reentrancy guard — a setInterval-driven job must never overlap itself
 let _pollTimer: ReturnType<typeof setInterval> | null = null;
 let _refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -180,7 +193,29 @@ export async function refreshIndex(): Promise<boolean> {
       const dataHash = item.compression?.data_hash;
       const creatorHash = item.compression?.creator_hash;
       if (leafIndex === undefined || leafIndex === null || !assetHash) continue;
-      if (item.burnt) continue; // see file header note 1
+      if (item.burnt) {
+        // Capture the memorial record right here, from the SAME DAS page that told us it's
+        // burnt — no extra call, and this is the last moment this data is available (the next
+        // refresh's bulk response may drop content.metadata for a burnt leaf entirely). First
+        // capture wins; never let a later, possibly-degraded page overwrite a good record.
+        if (!_burnt.has(item.id)) {
+          const previous = _state?.assetsById.get(item.id);
+          const name = item.content?.metadata?.name ?? previous?.name ?? null;
+          const match = name?.match(/#(\d+)/);
+          _burnt.set(item.id, {
+            number: match ? parseInt(match[1], 10) : null,
+            name,
+            mint: item.id,
+            image: item.content?.files?.[0]?.uri ?? previous?.image ?? null,
+            traits: item.content?.metadata?.attributes ?? previous?.traits ?? null,
+            lastSeenLeafIndex: leafIndex,
+            burnedAtMs: Date.now(),
+          });
+          persistBurnt();
+          console.log(`[indexer] captured memorial record for newly-burnt asset ${item.id}`);
+        }
+        continue; // see file header note 1 — excluded from the live index either way
+      }
       if (item.compression?.compressed === false) continue;
       leaves.set(leafIndex, Buffer.from(bs58.decode(assetHash)));
       if (owner && dataHash && creatorHash) {
@@ -264,6 +299,56 @@ function persistState(state: IndexState): void {
     // on-chain root regardless, so a write failure here is non-fatal.
     console.warn("[indexer] failed to persist state:", err instanceof Error ? err.message : err);
   }
+}
+
+function persistBurnt(): void {
+  try {
+    const serializable = Array.from(_burnt.entries());
+    writeFileSync(resolve(process.cwd(), BURNT_STATE_FILE), JSON.stringify(serializable), "utf8");
+  } catch (err) {
+    console.warn("[indexer] failed to persist burnt state:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** Loads the growing memorial log from disk, then merges in the checked-in seed file for burns
+ *  that happened before this indexer existed. Disk-persisted entries always win over the seed —
+ *  the seed is only a fallback for mints this indexer never itself observed being burnt. */
+function loadBurntFromDisk(): void {
+  const statePath = resolve(process.cwd(), BURNT_STATE_FILE);
+  if (existsSync(statePath)) {
+    try {
+      const raw = JSON.parse(readFileSync(statePath, "utf8")) as [string, BurntAsset][];
+      _burnt = new Map(raw);
+    } catch (err) {
+      console.warn("[indexer] failed to load burnt state:", err instanceof Error ? err.message : err);
+    }
+  }
+  const seedPath = resolve(process.cwd(), BURNT_SEED_FILE);
+  if (existsSync(seedPath)) {
+    try {
+      const seed = JSON.parse(readFileSync(seedPath, "utf8")) as BurntAsset[];
+      let added = 0;
+      for (const entry of seed) {
+        if (!_burnt.has(entry.mint)) {
+          _burnt.set(entry.mint, entry);
+          added++;
+        }
+      }
+      if (added > 0) {
+        console.log(`[indexer] merged ${added} backfilled entries from burnt seed file`);
+        persistBurnt();
+      }
+    } catch (err) {
+      console.warn("[indexer] failed to load burnt seed:", err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+/** The memorial list — every Monke ever observed (or backfilled) as burnt, with its last-known
+ *  name/image/traits. Purely static/historical: never re-verified against chain, since a burnt
+ *  leaf has no current on-chain state left to verify against. */
+export function getBurnt(): BurntAsset[] {
+  return Array.from(_burnt.values()).sort((a, b) => (a.number ?? Infinity) - (b.number ?? Infinity));
 }
 
 /** Loads the last-known-good snapshot from disk on boot, WITHOUT trusting it until the next
@@ -467,6 +552,7 @@ export function getStatus(): {
  */
 export function startIndexer(pollIntervalMs: number, refreshIntervalMs: number): void {
   loadStateFromDisk();
+  loadBurntFromDisk();
   void refreshIndex();
   if (_pollTimer) clearInterval(_pollTimer);
   if (_refreshTimer) clearInterval(_refreshTimer);

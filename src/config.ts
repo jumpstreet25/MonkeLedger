@@ -42,3 +42,15 @@ export const PROXY_SECRET = process.env.PROXY_SECRET ?? "";
 
 export const STATE_FILE = ".ledger_state.json";
 export const GETASSETSBYGROUP_PAGE_LIMIT = 1000;
+
+// Persists the memorial list (last-known name/image/traits for every leaf ever seen burnt) across
+// restarts. Separate file from STATE_FILE because it's a one-way-growing historical log, not a
+// point-in-time snapshot that gets wholesale replaced every refresh.
+export const BURNT_STATE_FILE = ".ledger_burnt.json";
+
+// Checked into the repo — the 15 Saga Monkes burnt before this indexer existed, backfilled from a
+// collaborator's own historical records (MonkeLedger has no way to recover metadata for a leaf
+// that was already burnt before it started watching). Every burn from here on is captured live by
+// refreshIndex() itself and needs no seed. Merged into _burnt on boot, never overwriting a
+// disk-persisted entry.
+export const BURNT_SEED_FILE = "data/burnt-seed.json";
