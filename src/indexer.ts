@@ -440,6 +440,7 @@ export function getStatus(): {
   builtAtMs: number | null;
   ageMs: number | null;
   leafCount: number;
+  uniqueOwners: number;
   root: string | null;
 } {
   return {
@@ -447,6 +448,11 @@ export function getStatus(): {
     builtAtMs: _state?.builtAtMs ?? null,
     ageMs: _state ? Date.now() - _state.builtAtMs : null,
     leafCount: _state?.leaves.size ?? 0,
+    // Cheap — Map.size, not a per-asset walk. Deliberately NOT escrow-stripped: which programs
+    // count as marketplace escrows is collection-specific knowledge that doesn't belong in a
+    // generic indexer. A consumer that needs an escrow-excluded count should pull /holders and
+    // filter client-side, same as the existing Saga Monkes consumers already do.
+    uniqueOwners: _state?.byOwner.size ?? 0,
     root: _state?.onChainRoot ?? null,
   };
 }

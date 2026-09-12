@@ -10,9 +10,10 @@ export const HELIUS_API_KEY = required("HELIUS_API_KEY");
 export const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
 // Cheap root-only polling doesn't need DAS at all — getAccountInfo is a plain RPC method, not a
-// billed Helius DAS call — so it defaults to the free public RPC, keeping the frequent poll leg
-// completely off the Helius key. Override if the public RPC's rate limits are a problem.
-export const POLL_RPC_URL = process.env.POLL_RPC_URL ?? "https://api.mainnet-beta.solana.com";
+// billed Helius DAS call — so it defaults to a free public RPC, keeping the frequent poll leg
+// completely off the Helius key. PublicNode rather than api.mainnet-beta.solana.com — generally
+// more reliable/less aggressively rate-limited for production use. Override if needed.
+export const POLL_RPC_URL = process.env.POLL_RPC_URL ?? "https://solana-rpc.publicnode.com";
 
 export const TREE_ADDRESS = new PublicKey(process.env.TREE_ADDRESS ?? required("TREE_ADDRESS"));
 export const COLLECTION_ADDRESS = process.env.COLLECTION_ADDRESS ?? required("COLLECTION_ADDRESS");

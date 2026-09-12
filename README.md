@@ -57,7 +57,7 @@ bun start
 ## Endpoints
 
 - `GET /health` — liveness check.
-- `GET /status` — `{ ready, builtAtMs, ageMs, leafCount, root }`.
+- `GET /status` — `{ ready, builtAtMs, ageMs, leafCount, uniqueOwners, root }`. `uniqueOwners` is a cheap in-memory count (not escrow-stripped — a consumer that needs that should pull `/holders` and filter client-side).
 - `GET /compression/:assetId` — everything needed to build or verify a Bubblegum transfer for one
   asset: `{ assetId, tree, root, dataHash, creatorHash, leafIndex, proof, owner, delegate }`
   (all hashes base58-encoded). 503 if the index isn't ready/is too stale, 404 if the asset isn't
