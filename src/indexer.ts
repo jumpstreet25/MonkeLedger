@@ -347,8 +347,68 @@ function loadBurntFromDisk(): void {
 /** The memorial list — every Monke ever observed (or backfilled) as burnt, with its last-known
  *  name/image/traits. Purely static/historical: never re-verified against chain, since a burnt
  *  leaf has no current on-chain state left to verify against. */
-export function getBurnt(): BurntAsset[] {
-  return Array.from(_burnt.values()).sort((a, b) => (a.number ?? Infinity) - (b.number ?? Infinity));
+export type RarityTier = "Legendary" | "Rare" | "Uncommon" | "Common";
+export type BurntAssetWithRarity = BurntAsset & {
+  rarityRank: number | null; // 1 = rarest in the whole collection; null if traits are missing
+  rarityTotal: number | null; // collection size rarity was computed against
+  rarityTier: RarityTier | null;
+};
+
+/**
+ * Statistical rarity ("sum of 1/trait-frequency", the standard scheme most NFT rarity tools use)
+ * computed across the WHOLE collection — every currently-live asset plus every burnt one — since
+ * rarity only means anything relative to the full set, not just the burnt subset. Live traits come
+ * from the same in-memory index this whole file already maintains; no extra DAS/Helius call.
+ * Recomputed on every call rather than cached: ~10k assets x 6 traits is microseconds, and the
+ * Worker in front of this already caches /burnt for 300s, so this never runs more than once every
+ * few minutes under real traffic regardless.
+ */
+function computeRarity(): Map<string, { rank: number; total: number; tier: RarityTier }> {
+  const all: { mint: string; traits: NftTrait[] | null }[] = [];
+  if (_state) for (const [mint, asset] of _state.assetsById) all.push({ mint, traits: asset.traits });
+  for (const [mint, b] of _burnt) all.push({ mint, traits: b.traits });
+
+  const freq = new Map<string, Map<string, number>>(); // trait_type -> value -> count
+  for (const { traits } of all) {
+    if (!traits) continue;
+    for (const t of traits) {
+      let byValue = freq.get(t.trait_type);
+      if (!byValue) { byValue = new Map(); freq.set(t.trait_type, byValue); }
+      byValue.set(t.value, (byValue.get(t.value) ?? 0) + 1);
+    }
+  }
+
+  const total = all.length;
+  const scored = all
+    .filter((a) => a.traits && a.traits.length > 0)
+    .map(({ mint, traits }) => {
+      let score = 0;
+      for (const t of traits!) {
+        const count = freq.get(t.trait_type)?.get(t.value) ?? 1;
+        score += total / count; // rarer trait value (lower count) contributes more
+      }
+      return { mint, score };
+    });
+  scored.sort((a, b) => b.score - a.score); // highest score = rarest, first
+
+  const out = new Map<string, { rank: number; total: number; tier: RarityTier }>();
+  scored.forEach((s, i) => {
+    const rank = i + 1;
+    const pct = rank / scored.length;
+    const tier: RarityTier = pct <= 0.01 ? "Legendary" : pct <= 0.1 ? "Rare" : pct <= 0.5 ? "Uncommon" : "Common";
+    out.set(s.mint, { rank, total, tier });
+  });
+  return out;
+}
+
+export function getBurnt(): BurntAssetWithRarity[] {
+  const rarity = computeRarity();
+  return Array.from(_burnt.values())
+    .map((b) => {
+      const r = rarity.get(b.mint);
+      return { ...b, rarityRank: r?.rank ?? null, rarityTotal: r?.total ?? null, rarityTier: r?.tier ?? null };
+    })
+    .sort((a, b) => (a.number ?? Infinity) - (b.number ?? Infinity));
 }
 
 /** Loads the last-known-good snapshot from disk on boot, WITHOUT trusting it until the next
