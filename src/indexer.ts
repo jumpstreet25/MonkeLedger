@@ -41,6 +41,7 @@ import {
   GETASSETSBYGROUP_PAGE_LIMIT,
   BURNT_STATE_FILE,
   BURNT_SEED_FILE,
+  MIN_REFRESH_INTERVAL_MS,
 } from "./config";
 
 export type NftTrait = { trait_type: string; value: string };
@@ -112,12 +113,22 @@ async function readOnChainRoot(connection: Connection): Promise<{ root: Buffer; 
  * beyond one plain RPC call, instead of a full ~13-request DAS scan regardless of whether
  * anything changed.
  */
+let _lastDeferredRoot = "";
+
 export async function pollForChange(): Promise<void> {
   if (_refreshing) return;
   try {
     const live = await readOnChainRoot(getPollConnection());
     const liveHex = live.root.toString("hex");
     if (_state && liveHex === _state.onChainRoot) return; // no change — nothing to do
+    if (_state && Date.now() - _state.builtAtMs < MIN_REFRESH_INTERVAL_MS) {
+      if (liveHex !== _lastDeferredRoot) {
+        _lastDeferredRoot = liveHex;
+        const inMin = Math.ceil((MIN_REFRESH_INTERVAL_MS - (Date.now() - _state.builtAtMs)) / 60_000);
+        console.log(`[indexer] root changed — deferring full refresh ~${inMin} min (MIN_REFRESH_INTERVAL_MS)`);
+      }
+      return;
+    }
     console.log(`[indexer] root change detected (or no state yet) — running full refresh`);
     await refreshIndex();
   } catch (err) {
