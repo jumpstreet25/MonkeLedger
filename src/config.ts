@@ -33,6 +33,14 @@ export const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? "120000
 // a routine sync. Default 24h; tighten if you ever have reason to distrust the poll loop.
 export const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS ?? "86400000", 10);
 
+// Minimum gap between Helius-backed full refreshes, however often the root changes. Every
+// transfer/listing/burn on ANY asset moves the root, so on an active day the poll loop alone
+// used to trigger dozens of full DAS snapshots. Ownership served in between may be up to this
+// old: consumers must treat a MonkeLedger "no" as non-authoritative and a "yes" as possibly
+// just-sold (the OnlyMonkes bot's nftGate is confirm-only and falls through on "no"). Default
+// 12h (owner call, 2026-09-30). A failed refresh still retries after dasClient's 20-min backoff.
+export const MIN_REFRESH_INTERVAL_MS = parseInt(process.env.MIN_REFRESH_INTERVAL_MS ?? "43200000", 10);
+
 export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? "30", 10);
 export const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? "60000", 10);
 

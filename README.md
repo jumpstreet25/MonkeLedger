@@ -30,7 +30,7 @@ of whether anything even happened:
 1. Every `POLL_INTERVAL_MS` (default 2 min), read just the tree's current on-chain root — a plain
    `getAccountInfo`, not a DAS call, and by default not even against Helius (see `POLL_RPC_URL`).
    If it matches what's already indexed, stop there — nothing else happens.
-2. Only when the root has actually changed: fetch every asset in the collection via DAS
+2. Only when the root has actually changed **and** at least `MIN_REFRESH_INTERVAL_MS` (default 12h) has passed since the last good build: fetch every asset in the collection via DAS
    `getAssetsByGroup`, reading the root again before and after to confirm nothing changed on-chain
    mid-scan.
 3. Rebuild a local Merkle tree from that snapshot (same padding/hashing convention as
