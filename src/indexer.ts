@@ -42,6 +42,7 @@ import {
   BURNT_STATE_FILE,
   BURNT_SEED_FILE,
   MIN_REFRESH_INTERVAL_MS,
+  FAILED_REFRESH_RETRY_MS,
 } from "./config";
 
 export type NftTrait = { trait_type: string; value: string };
@@ -180,9 +181,13 @@ async function fetchAllAssets(): Promise<DasAssetItem[]> {
  * root before accepting it. Returns false (leaving any prior good state in place) if the
  * rebuild doesn't match — a stale/bad snapshot must never silently replace a known-good one.
  */
+let _lastFailedAt = 0;
+
 export async function refreshIndex(): Promise<boolean> {
   if (_refreshing) return false;
+  if (_lastFailedAt && Date.now() - _lastFailedAt < FAILED_REFRESH_RETRY_MS) return false;
   _refreshing = true;
+  let ok = false;
   try {
     // Root reads are plain getAccountInfo, not DAS — same reasoning as pollForChange() above,
     // no need to spend a Helius-backed request on these when the free RPC does the job.
@@ -276,11 +281,16 @@ export async function refreshIndex(): Promise<boolean> {
     };
     persistState(_state);
     console.log(`[indexer] refreshed OK — ${leaves.size} live leaves, root=${_state.onChainRoot}`);
+    ok = true;
     return true;
   } catch (err) {
     console.error("[indexer] refresh failed:", err instanceof Error ? err.message : err);
     return false;
   } finally {
+    // Failed attempts (DAS error, mid-scan root change, root mismatch) wait
+    // FAILED_REFRESH_RETRY_MS before the next try; success clears it.
+    _lastFailedAt = ok ? 0 : Date.now();
+    if (!ok) console.warn(`[indexer] refresh did not complete — next attempt in ~${Math.round(FAILED_REFRESH_RETRY_MS / 60_000)} min`);
     _refreshing = false;
   }
 }
@@ -624,7 +634,10 @@ export function getStatus(): {
 export function startIndexer(pollIntervalMs: number, refreshIntervalMs: number): void {
   loadStateFromDisk();
   loadBurntFromDisk();
-  void refreshIndex();
+  // Don't spend Helius credits on every restart: a saved index younger than
+  // MIN_REFRESH_INTERVAL_MS is served as-is; the poll/backstop timers refresh it later.
+  if (!_state || Date.now() - _state.builtAtMs >= MIN_REFRESH_INTERVAL_MS) void refreshIndex();
+  else console.log(`[indexer] saved index is ${Math.round((Date.now() - _state.builtAtMs) / 60_000)} min old — skipping boot refresh`);
   if (_pollTimer) clearInterval(_pollTimer);
   if (_refreshTimer) clearInterval(_refreshTimer);
   _pollTimer = setInterval(() => void pollForChange(), pollIntervalMs);

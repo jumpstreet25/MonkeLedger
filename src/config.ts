@@ -40,6 +40,11 @@ export const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS ?? "
 // just-sold (the OnlyMonkes bot's nftGate is confirm-only and falls through on "no"). Default
 // 12h (owner call, 2026-09-30). A failed refresh still retries after dasClient's 20-min backoff.
 export const MIN_REFRESH_INTERVAL_MS = parseInt(process.env.MIN_REFRESH_INTERVAL_MS ?? "43200000", 10);
+// After a FAILED full refresh, wait this long before the next attempt (2026-10-02, owner call:
+// "call it every 12 hours or so, don't hammer it"). Previously a failure retried on the next
+// poll as soon as dasClient's 20-min backoff lapsed — ~350 Helius calls in 2h against a drained
+// key. Default 2h.
+export const FAILED_REFRESH_RETRY_MS = parseInt(process.env.FAILED_REFRESH_RETRY_MS ?? "7200000", 10);
 
 export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? "30", 10);
 export const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? "60000", 10);
