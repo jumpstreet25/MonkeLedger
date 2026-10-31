@@ -2,7 +2,14 @@ import express from "express";
 import { PublicKey } from "@solana/web3.js";
 import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, exportAll, getHolders, getStatus, getBurnt } from "./indexer";
 import { rateLimit } from "./rateLimit";
-import { PORT, BIND_HOST, REFRESH_INTERVAL_MS } from "./config";
+import { timingSafeEqual } from "crypto";
+import { PORT, BIND_HOST, REFRESH_INTERVAL_MS, PROXY_SECRET } from "./config";
+
+function sameSecret(given: string | string[] | undefined, expected: string): boolean {
+  if (!expected || typeof given !== "string") return false;
+  const a = Buffer.from(given), b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 // Staleness threshold for refusing to serve — 2x the refresh interval means at least one full
 // cycle was missed, which is worth surfacing as "don't trust this" rather than silently serving
@@ -12,6 +19,18 @@ const MAX_ACCEPTABLE_AGE_MS = REFRESH_INTERVAL_MS * 2;
 export function startServer(): void {
   const app = express();
   app.disable("x-powered-by");
+  // Internet traffic only reaches this port through the Cloudflare tunnel (ledger.onlymonkes.app),
+  // so it carries Cloudflare's headers; only the monkeledger Worker (X-Proxy-Secret) may use that
+  // path, so its caching and the per-IP limit can't be skipped. Local callers (the bot on
+  // 127.0.0.1) have no Cloudflare headers and pass.
+  app.use((req, res, next) => {
+    const viaCloudflare = req.headers["cf-ray"] !== undefined || req.headers["cf-connecting-ip"] !== undefined;
+    if (viaCloudflare && !sameSecret(req.headers["x-proxy-secret"], PROXY_SECRET)) {
+      res.status(403).json({ error: "use https://monkeledger.jumpstreet25.workers.dev" });
+      return;
+    }
+    next();
+  });
   app.use(rateLimit);
 
   app.get("/health", (_req, res) => {
