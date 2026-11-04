@@ -16,7 +16,7 @@ function sameSecret(given: string | string[] | undefined, expected: string): boo
 // arbitrarily old data if the refresh loop is stuck/erroring.
 const MAX_ACCEPTABLE_AGE_MS = REFRESH_INTERVAL_MS * 2;
 
-const PUBLIC_URL = "https://monkeledger.jumpstreet25.workers.dev";
+const PUBLIC_URL = "https://monkeledger.onlymonkes.app";
 // Direct visits to ledger.onlymonkes.app, counted per UTC day and logged when the day turns
 // (and at most hourly in between) so we can see who looks for MonkeLedger there.
 let directDay = new Date().toISOString().slice(0, 10);
