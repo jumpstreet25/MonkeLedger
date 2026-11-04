@@ -1,6 +1,10 @@
 name = "monkeledger"
 main = "src/index.ts"
 compatibility_date = "2026-03-23"
+# Friendly public address. workers_dev must stay true: the app and bot call the workers.dev URL,
+# and a custom domain turns workers.dev off unless it's set explicitly.
+workers_dev = true
+routes = [{ pattern = "monkeledger.onlymonkes.app", custom_domain = true }]
 
 # Reverse proxy in front of the MonkeLedger backend (see ../src for that service). Gives the
 # backend a real HTTPS URL, Cloudflare's edge as a shock absorber in front of a VPS process that
