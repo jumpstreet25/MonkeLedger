@@ -16,17 +16,39 @@ function sameSecret(given: string | string[] | undefined, expected: string): boo
 // arbitrarily old data if the refresh loop is stuck/erroring.
 const MAX_ACCEPTABLE_AGE_MS = REFRESH_INTERVAL_MS * 2;
 
+const PUBLIC_URL = "https://monkeledger.jumpstreet25.workers.dev";
+// Direct visits to ledger.onlymonkes.app, counted per UTC day and logged when the day turns
+// (and at most hourly in between) so we can see who looks for MonkeLedger there.
+let directDay = new Date().toISOString().slice(0, 10);
+let directCount = 0;
+let directLoggedAt = 0;
+export function countDirectVisit(now = Date.now()): void {
+  const day = new Date(now).toISOString().slice(0, 10);
+  if (day !== directDay) {
+    console.log(`[server] direct visits ${directDay}: ${directCount} (sent to the public URL)`);
+    directDay = day;
+    directCount = 0;
+  }
+  directCount++;
+  if (now - directLoggedAt >= 3_600_000) {
+    console.log(`[server] direct visits ${directDay} so far: ${directCount}`);
+    directLoggedAt = now;
+  }
+}
+
 export function startServer(): void {
   const app = express();
   app.disable("x-powered-by");
   // Internet traffic only reaches this port through the Cloudflare tunnel (ledger.onlymonkes.app),
   // so it carries Cloudflare's headers; only the monkeledger Worker (X-Proxy-Secret) may use that
   // path, so its caching and the per-IP limit can't be skipped. Local callers (the bot on
-  // 127.0.0.1) have no Cloudflare headers and pass.
+  // 127.0.0.1) have no Cloudflare headers and pass. Anyone else is redirected to the same path
+  // on the public Worker (MonkeLedger is public; this address just isn't the front door).
   app.use((req, res, next) => {
     const viaCloudflare = req.headers["cf-ray"] !== undefined || req.headers["cf-connecting-ip"] !== undefined;
     if (viaCloudflare && !sameSecret(req.headers["x-proxy-secret"], PROXY_SECRET)) {
-      res.status(403).json({ error: "use https://monkeledger.jumpstreet25.workers.dev" });
+      countDirectVisit();
+      res.redirect(308, PUBLIC_URL + req.originalUrl);
       return;
     }
     next();
