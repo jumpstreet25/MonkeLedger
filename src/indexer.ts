@@ -295,6 +295,70 @@ export async function refreshIndex(): Promise<boolean> {
   }
 }
 
+/**
+ * One asset that just changed hands (2026-11-05): the bot's Saga Monke sale feed calls
+ * POST /refresh-asset with the asset id. One getAsset call re-reads it, and its owner and
+ * leaf are patched into the index, so a sale shows within seconds instead of at the next
+ * full refresh (up to MIN_REFRESH_INTERVAL_MS). The caller's word is never trusted: the new
+ * owner comes from DAS, only assets already in the index are touched, and a separate daily
+ * cap (SINGLE_REFRESH_DAILY_MAX) bounds the cost. The full refresh still runs on schedule.
+ */
+const SINGLE_REFRESH_DAILY_MAX = Math.max(0, parseInt(process.env.SINGLE_REFRESH_DAILY_MAX ?? "20", 10) || 0);
+let _singleDay = "";
+let _singleUsed = 0;
+
+/** Test-only: install a hand-built index. */
+export function _setStateForTest(state: IndexState | null): void {
+  _state = state;
+}
+
+export type SingleRefreshResult = "updated" | "unchanged" | "skipped" | "failed";
+
+export async function refreshSingleAsset(assetId: string): Promise<SingleRefreshResult> {
+  const state = _state;
+  const prev = state?.assetsById.get(assetId);
+  if (!state || !prev || _refreshing) return "skipped";
+  const day = new Date().toISOString().slice(0, 10);
+  if (day !== _singleDay) { _singleDay = day; _singleUsed = 0; }
+  if (_singleUsed >= SINGLE_REFRESH_DAILY_MAX) return "skipped";
+  _singleUsed++;
+  try {
+    const item = (await dasCallRetry("getAsset", { id: assetId }, 15_000, 2)) as DasAssetItem;
+    const c = item?.compression;
+    const owner = item?.ownership?.owner;
+    if (item?.burnt || !owner || !c?.asset_hash || !c.data_hash || !c.creator_hash || c.leaf_id !== prev.leafIndex) {
+      return "skipped"; // burnt or reshaped: leave it to the full refresh
+    }
+    const newLeaf = Buffer.from(bs58.decode(c.asset_hash));
+    if (owner === prev.owner && state.leaves.get(prev.leafIndex)?.equals(newLeaf)) return "unchanged";
+    state.assetsById.set(assetId, {
+      ...prev,
+      owner,
+      delegate: item.ownership?.delegate ?? null,
+      dataHash: c.data_hash,
+      creatorHash: c.creator_hash,
+    });
+    state.leaves.set(prev.leafIndex, newLeaf);
+    state.tree.updateLeaf(prev.leafIndex, newLeaf);
+    state.byOwner = buildOwnerIndex(state.assetsById);
+    // If this was the only change on the tree, our root now matches the chain again and
+    // compression proofs are current; otherwise the poll still sees a mismatch and the
+    // full refresh fixes the rest on schedule.
+    const live = await Promise.race([
+      readOnChainRoot(getPollConnection()),
+      new Promise<null>((r) => setTimeout(() => r(null), 5_000)),
+    ]).catch(() => null);
+    const computed = Buffer.from(state.tree.root).toString("hex");
+    if (live && live.root.toString("hex") === computed) state.onChainRoot = computed;
+    persistState(state);
+    console.log(`[indexer] single refresh ${assetId}: owner updated${state.onChainRoot === computed ? ", root in sync" : ""}`);
+    return "updated";
+  } catch (err) {
+    console.warn(`[indexer] single refresh ${assetId} failed:`, err instanceof Error ? err.message : err);
+    return "failed";
+  }
+}
+
 function buildOwnerIndex(assetsById: Map<string, IndexedAsset>): Map<string, string[]> {
   const byOwner = new Map<string, string[]>();
   for (const [assetId, asset] of assetsById) {

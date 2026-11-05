@@ -1,9 +1,9 @@
 import express from "express";
 import { PublicKey } from "@solana/web3.js";
-import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, exportAll, getHolders, getStatus, getBurnt } from "./indexer";
+import { getCompressionDataForAsset, getOwnerOfAsset, getAssetsOwnedByWallet, getMetadataForAsset, exportAll, getHolders, getStatus, getBurnt, refreshSingleAsset } from "./indexer";
 import { rateLimit } from "./rateLimit";
 import { timingSafeEqual } from "crypto";
-import { PORT, BIND_HOST, REFRESH_INTERVAL_MS, PROXY_SECRET } from "./config";
+import { PORT, BIND_HOST, REFRESH_INTERVAL_MS, PROXY_SECRET, REFRESH_ASSET_SECRET } from "./config";
 
 function sameSecret(given: string | string[] | undefined, expected: string): boolean {
   if (!expected || typeof given !== "string") return false;
@@ -57,6 +57,21 @@ export function startServer(): void {
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true });
+  });
+
+  // The bot's sale feed: re-read one asset now (indexer.refreshSingleAsset). Local only —
+  // anything that came through Cloudflare (tunnel or the public Worker) is refused, and the
+  // bearer must match REFRESH_ASSET_SECRET.
+  app.post("/refresh-asset/:assetId", async (req, res) => {
+    const viaCloudflare = req.headers["cf-ray"] !== undefined || req.headers["cf-connecting-ip"] !== undefined;
+    const auth = req.headers.authorization ?? "";
+    if (viaCloudflare || !sameSecret(auth.startsWith("Bearer ") ? auth.slice(7) : undefined, REFRESH_ASSET_SECRET)) {
+      res.status(404).json({ error: "not found" });
+      return;
+    }
+    const assetId = req.params.assetId;
+    try { new PublicKey(assetId); } catch { res.status(400).json({ error: "bad asset id" }); return; }
+    res.json({ result: await refreshSingleAsset(assetId) });
   });
 
   app.get("/status", (_req, res) => {

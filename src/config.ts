@@ -67,3 +67,6 @@ export const BURNT_STATE_FILE = ".ledger_burnt.json";
 // refreshIndex() itself and needs no seed. Merged into _burnt on boot, never overwriting a
 // disk-persisted entry.
 export const BURNT_SEED_FILE = "data/burnt-seed.json";
+
+// Shared secret for POST /refresh-asset (the bot's sale feed, 127.0.0.1 only). Unset = endpoint off.
+export const REFRESH_ASSET_SECRET = process.env.REFRESH_ASSET_SECRET ?? "";
