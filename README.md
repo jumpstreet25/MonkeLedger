@@ -23,6 +23,23 @@ a wrong one.
 
 ## How it works
 
+**Chain follow (2026-11-09) — no DAS in normal running.** Every change to the tree logs its new
+leaf, the path up to the new root, the sequence number, and (from Bubblegum) the asset's owner,
+delegate and hashes, in the same transaction. `src/chainFollow.ts` reads those with plain RPC
+(`getSignaturesForAddress` + `getTransaction`), checks `keccak256(0x01 || schema)` equals each
+leaf, applies the changes in sequence order, and requires every intermediate root and the final
+live root to match. Owners served are therefore proven against the chain. An index saved before
+this existed finds its place by matching its root to an event's resulting root. A sale ping
+(`/refresh-asset`) runs the same sync immediately.
+
+DAS (below) is now only the fallback: it builds an index from nothing, and runs when chain follow
+can't catch up (history too short, a missing sequence number, a mismatch). `HELIUS_API_KEY` is
+optional; without it MonkeLedger runs on plain RPC alone. `CHAIN_RPC_URLS` (comma-separated)
+sets the RPCs, tried in order — publicnode keeps about a day of history, so keep a full-history
+endpoint after it.
+
+**DAS snapshot (fallback):**
+
 A full collection snapshot is the expensive step (a paginated DAS `getAssetsByGroup` scan — ~11
 requests for a 10k-asset collection), so it's decoupled from a much cheaper, more frequent check
 of whether anything even happened:

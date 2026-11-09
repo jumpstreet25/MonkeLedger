@@ -6,8 +6,17 @@ function required(name: string): string {
   return v;
 }
 
-export const HELIUS_API_KEY = required("HELIUS_API_KEY");
-export const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+// Optional since chain follow (2026-11-09): without a key MonkeLedger runs on plain RPC
+// alone; with one, DAS is the fallback when chain follow can't catch up, and the only way
+// to build an index from nothing.
+export const HELIUS_API_KEY = process.env.HELIUS_API_KEY ?? "";
+export const DAS_ENABLED = HELIUS_API_KEY !== "";
+export const RPC_URL = DAS_ENABLED ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : "";
+
+// Chain follow (chainFollow.ts): tried in order. publicnode keeps only ~1 day of history,
+// so the full-history public endpoint is the fallback for longer catch-ups.
+export const CHAIN_RPC_URLS = (process.env.CHAIN_RPC_URLS ?? "https://solana-rpc.publicnode.com,https://api.mainnet-beta.solana.com")
+  .split(",").map((u) => u.trim()).filter(Boolean);
 
 // Cheap root-only polling doesn't need DAS at all — getAccountInfo is a plain RPC method, not a
 // billed Helius DAS call — so it defaults to a free public RPC, keeping the frequent poll leg

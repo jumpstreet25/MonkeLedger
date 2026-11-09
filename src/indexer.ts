@@ -33,6 +33,7 @@ import { Connection } from "@solana/web3.js";
 import { ConcurrentMerkleTreeAccount, MerkleTree } from "@solana/spl-account-compression";
 import bs58 from "bs58";
 import { dasCallRetry } from "./dasClient";
+import { collectTreeEvents, httpRpc, isZero } from "./chainFollow";
 import {
   POLL_RPC_URL,
   TREE_ADDRESS,
@@ -43,6 +44,8 @@ import {
   BURNT_SEED_FILE,
   MIN_REFRESH_INTERVAL_MS,
   FAILED_REFRESH_RETRY_MS,
+  CHAIN_RPC_URLS,
+  DAS_ENABLED,
 } from "./config";
 
 export type NftTrait = { trait_type: string; value: string };
@@ -66,6 +69,7 @@ type IndexedAsset = {
 type IndexState = {
   builtAtMs: number;
   onChainRoot: string; // hex
+  seq: number | null; // tree sequence number this index matches (null: saved before chain follow)
   depth: number;
   leaves: Map<number, Buffer>; // leafIndex -> asset_hash (raw 32 bytes)
   assetsById: Map<string, IndexedAsset>;
@@ -121,7 +125,13 @@ export async function pollForChange(): Promise<void> {
   try {
     const live = await readOnChainRoot(getPollConnection());
     const liveHex = live.root.toString("hex");
-    if (_state && liveHex === _state.onChainRoot) return; // no change — nothing to do
+    if (_state && liveHex === _state.onChainRoot) {
+      if (_state.seq === null) _state.seq = Number(live.seq);
+      _state.builtAtMs = _lastChainOkAt = Date.now(); // age = time since last verified against the chain
+      return; // no change — nothing to do
+    }
+    if (_state && (await syncFromChain(live)) !== "failed") return;
+    if (!DAS_ENABLED) return; // no fallback configured: keep serving, /status shows the age
     if (_state && Date.now() - _state.builtAtMs < MIN_REFRESH_INTERVAL_MS) {
       if (liveHex !== _lastDeferredRoot) {
         _lastDeferredRoot = liveHex;
@@ -273,6 +283,7 @@ export async function refreshIndex(): Promise<boolean> {
     _state = {
       builtAtMs: Date.now(),
       onChainRoot: before.root.toString("hex"),
+      seq: Number(before.seq),
       depth,
       leaves,
       assetsById,
@@ -295,6 +306,109 @@ export async function refreshIndex(): Promise<boolean> {
   }
 }
 
+let _lastChainOkAt = 0;
+let _chainSyncing = false;
+let _chainFailNote = "";
+
+/**
+ * Bring the index up to the live root from the tree's own transactions (chainFollow.ts) —
+ * plain RPC, no DAS. Works on copies and only replaces the state when every event's root
+ * and the final live root match. "failed" leaves the current state untouched.
+ */
+export async function syncFromChain(live?: { root: Buffer; depth: number; seq: string }): Promise<"in-sync" | "updated" | "failed"> {
+  const state = _state;
+  if (!state || _chainSyncing || _refreshing) return "failed";
+  _chainSyncing = true;
+  try {
+    live ??= await readOnChainRoot(getPollConnection());
+    const liveHex = live.root.toString("hex");
+    const target = Number(live.seq);
+    if (liveHex === state.onChainRoot) {
+      if (state.seq === null) state.seq = target;
+      state.builtAtMs = _lastChainOkAt = Date.now();
+      return "in-sync";
+    }
+    let found: Awaited<ReturnType<typeof collectTreeEvents>> = null;
+    for (const [i, url] of CHAIN_RPC_URLS.entries()) {
+      try {
+        found = await collectTreeEvents(httpRpc(url), TREE_ADDRESS.toBase58(), { seq: state.seq, root: state.onChainRoot }, { seq: target }, { pauseMs: i === 0 ? 0 : 250 });
+      } catch (err) {
+        console.warn(`[chain] ${new URL(url).host}: ${err instanceof Error ? err.message : err}`);
+      }
+      if (found) break;
+    }
+    if (!found) return noteChainFail("history incomplete or a sequence number missing");
+
+    const leaves = new Map(state.leaves);
+    const assetsById = new Map(state.assetsById);
+    const byLeaf = new Map<number, string>();
+    for (const [id, a] of assetsById) byLeaf.set(a.leafIndex, id);
+    const tree = buildTree(leaves, state.depth);
+    const burnt: BurntAsset[] = [];
+    for (const ev of found.events) {
+      if (isZero(ev.leaf)) {
+        const id = byLeaf.get(ev.index);
+        if (id) {
+          const gone = assetsById.get(id)!;
+          if (ev.burn) {
+            const match = gone.name?.match(/#(\d+)/);
+            burnt.push({ number: match ? parseInt(match[1], 10) : null, name: gone.name, mint: id, image: gone.image, traits: gone.traits, lastSeenLeafIndex: ev.index, burnedAtMs: Date.now() });
+          }
+          assetsById.delete(id);
+          byLeaf.delete(ev.index);
+        }
+        leaves.delete(ev.index);
+      } else {
+        const sc = ev.schema!;
+        const prev = assetsById.get(sc.id);
+        if (prev && prev.leafIndex !== ev.index) byLeaf.delete(prev.leafIndex);
+        assetsById.set(sc.id, {
+          leafIndex: ev.index,
+          owner: sc.owner,
+          delegate: sc.delegate === sc.owner ? null : sc.delegate, // DAS's convention
+          dataHash: sc.dataHash,
+          creatorHash: sc.creatorHash,
+          name: prev?.name ?? null,
+          symbol: prev?.symbol ?? null,
+          image: prev?.image ?? null,
+          traits: prev?.traits ?? null,
+        });
+        byLeaf.set(ev.index, sc.id);
+        leaves.set(ev.index, ev.leaf);
+      }
+      tree.updateLeaf(ev.index, ev.leaf);
+      if (!Buffer.from(tree.root).equals(ev.root)) return noteChainFail(`root mismatch after seq ${ev.seq}`);
+    }
+    if (Buffer.from(tree.root).toString("hex") !== liveHex) return noteChainFail("final root differs from the live root");
+
+    _state = { builtAtMs: Date.now(), onChainRoot: liveHex, seq: target, depth: state.depth, leaves, assetsById, byOwner: buildOwnerIndex(assetsById), tree };
+    persistState(_state);
+    for (const b of burnt) if (!_burnt.has(b.mint)) _burnt.set(b.mint, b);
+    if (burnt.length) persistBurnt();
+    _lastChainOkAt = Date.now();
+    _chainFailNote = "";
+    console.log(`[chain] applied ${found.events.length} change(s) → seq ${target}, root verified`);
+    return "updated";
+  } catch (err) {
+    return noteChainFail(err instanceof Error ? err.message : String(err));
+  } finally {
+    _chainSyncing = false;
+  }
+}
+
+function noteChainFail(why: string): "failed" {
+  if (why !== _chainFailNote) console.warn(`[chain] sync failed: ${why}`);
+  _chainFailNote = why;
+  return "failed";
+}
+
+function buildTree(leaves: Map<number, Buffer>, depth: number): MerkleTree {
+  const totalSlots = 2 ** depth;
+  const leafBuffers: Buffer[] = new Array(totalSlots);
+  for (let i = 0; i < totalSlots; i++) leafBuffers[i] = leaves.get(i) ?? Buffer.alloc(32, 0);
+  return MerkleTree.sparseMerkleTreeFromLeaves(leafBuffers, depth);
+}
+
 /**
  * One asset that just changed hands (2026-11-05): the bot's Saga Monke sale feed calls
  * POST /refresh-asset with the asset id. One getAsset call re-reads it, and its owner and
@@ -315,9 +429,16 @@ export function _setStateForTest(state: IndexState | null): void {
 export type SingleRefreshResult = "updated" | "unchanged" | "skipped" | "failed";
 
 export async function refreshSingleAsset(assetId: string): Promise<SingleRefreshResult> {
+  const before = _state?.assetsById.get(assetId);
+  if (!_state || !before || _refreshing) return "skipped";
+  // Follow the chain first: free, and it brings every change since the last poll.
+  const chain = await syncFromChain();
+  if (chain === "in-sync") return "unchanged";
+  if (chain === "updated") return _state?.assetsById.get(assetId)?.owner === before.owner ? "unchanged" : "updated";
+  if (!DAS_ENABLED) return "failed";
   const state = _state;
   const prev = state?.assetsById.get(assetId);
-  if (!state || !prev || _refreshing) return "skipped";
+  if (!state || !prev) return "skipped";
   const day = new Date().toISOString().slice(0, 10);
   if (day !== _singleDay) { _singleDay = day; _singleUsed = 0; }
   if (_singleUsed >= SINGLE_REFRESH_DAILY_MAX) return "skipped";
@@ -374,6 +495,7 @@ function persistState(state: IndexState): void {
     const serializable = {
       builtAtMs: state.builtAtMs,
       onChainRoot: state.onChainRoot,
+      seq: state.seq,
       depth: state.depth,
       leaves: Array.from(state.leaves.entries()).map(([idx, buf]) => [idx, buf.toString("hex")]),
       assetsById: Array.from(state.assetsById.entries()),
@@ -506,6 +628,7 @@ export function loadStateFromDisk(): boolean {
     const raw = JSON.parse(readFileSync(path, "utf8")) as {
       builtAtMs: number;
       onChainRoot: string;
+      seq?: number | null;
       depth: number;
       leaves: [number, string][];
       assetsById: [string, IndexedAsset][];
@@ -519,6 +642,7 @@ export function loadStateFromDisk(): boolean {
     _state = {
       builtAtMs: raw.builtAtMs,
       onChainRoot: raw.onChainRoot,
+      seq: raw.seq ?? null,
       depth: raw.depth,
       leaves,
       assetsById,
@@ -672,6 +796,8 @@ export function getStatus(): {
   leafCount: number;
   uniqueOwners: number;
   root: string | null;
+  seq: number | null;
+  chainFollow: { lastOkAt: number | null; lastError: string | null };
 } {
   return {
     ready: _state !== null,
@@ -684,6 +810,8 @@ export function getStatus(): {
     // filter client-side, same as the existing Saga Monkes consumers already do.
     uniqueOwners: _state?.byOwner.size ?? 0,
     root: _state?.onChainRoot ?? null,
+    seq: _state?.seq ?? null,
+    chainFollow: { lastOkAt: _lastChainOkAt || null, lastError: _chainFailNote || null },
   };
 }
 
@@ -700,12 +828,15 @@ export function startIndexer(pollIntervalMs: number, refreshIntervalMs: number):
   loadBurntFromDisk();
   // Don't spend Helius credits on every restart: a saved index younger than
   // MIN_REFRESH_INTERVAL_MS is served as-is; the poll/backstop timers refresh it later.
-  if (!_state || Date.now() - _state.builtAtMs >= MIN_REFRESH_INTERVAL_MS) void refreshIndex();
-  else console.log(`[indexer] saved index is ${Math.round((Date.now() - _state.builtAtMs) / 60_000)} min old — skipping boot refresh`);
+  if (!_state && DAS_ENABLED) void refreshIndex(); // nothing to follow from yet
+  else if (_state) void pollForChange();
   if (_pollTimer) clearInterval(_pollTimer);
   if (_refreshTimer) clearInterval(_refreshTimer);
   _pollTimer = setInterval(() => void pollForChange(), pollIntervalMs);
-  _refreshTimer = setInterval(() => void refreshIndex(), refreshIntervalMs);
+  // DAS backstop only while chain follow is failing (or there's no index at all).
+  _refreshTimer = setInterval(() => {
+    if (DAS_ENABLED && (!_state || Date.now() - _lastChainOkAt > refreshIntervalMs)) void refreshIndex();
+  }, refreshIntervalMs);
 }
 
 export function stopIndexer(): void {
